@@ -67,7 +67,7 @@ def extract_sf_locations(playwright: Playwright):
             'anthropic-version': '2023-06-01'
         }
         
-        prompt = f"""Given the HTML schedule below, extract the San Francisco locations and format them as a JSON object. 
+        prompt = f"""Given the HTML schedule below, extract the San Francisco locations and format them as a JSON object. Do not include cart only events.
         The dates should be in MM-DD format as keys, and each date should have an array of event objects.
         Each event object should include:
         - title
@@ -86,7 +86,7 @@ def extract_sf_locations(playwright: Playwright):
             headers=headers,
             json={
                 "messages": [{"role": "user", "content": prompt}],
-                "model": "claude-3-sonnet-20240229",
+                "model": "claude-3-5-sonnet-latest",
                 "max_tokens": 4096,
                 "temperature": 0
             }
@@ -150,8 +150,8 @@ class FoodTruckCalendar:
         try:
             events = self.service.events().list(
                 calendarId=self.calendar_id,
-                timeMin=start_date.isoformat() + 'Z',
-                timeMax=end_date.isoformat() + 'Z'
+                timeMin=start_date.isoformat() + '-08:00',
+                timeMax=end_date.isoformat() + '-08:00'
             ).execute()
             
             for event in events.get('items', []):
@@ -218,7 +218,7 @@ class FoodTruckCalendar:
 @app.function(
     image=image,
     volumes={"/credentials": volume},
-    schedule=modal.Cron("0 8 * * 6"),
+    schedule=modal.Cron("0 18 * * 6"),
     secrets=[modal.Secret.from_name("cousin-lobster-secrets")]    
 )
 def update_calendar():
