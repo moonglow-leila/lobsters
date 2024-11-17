@@ -1,19 +1,117 @@
-from google.oauth2 import service_account
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
+import os
+import json
+from playwright.sync_api import sync_playwright, Playwright
+import requests
 from datetime import datetime, timedelta
-import os.path
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 
 import modal
 
+volume = modal.Volume.from_name("cousin-lobster-credentials")
 app = modal.App("cousin-lobster")
 
-volume = modal.Volume.from_name("cousin-lobster-credentials")
-stub = modal.App("cousin-lobster")
-
 image = modal.Image.debian_slim().pip_install(
-    "google-api-python-client"  # Note: we don't need oauth2client anymore
-)
+    "google-api-python-client",
+    "playwright",
+    "requests"
+).run_commands("playwright install chromium")
+
+def validate_locations(locations):
+    """Validates and filters location data structure"""
+    if not isinstance(locations, dict):
+        return None
+        
+    filtered_locations = {}
+    for date, events in locations.items():
+        # Validate date format (MM-DD)
+        if not isinstance(date, str) or not len(date.split('-')) == 2:
+            return None
+            
+        # Filter and validate events
+        sf_events = []
+        for event in events:
+            if not all(key in event for key in ['title', 'location', 'maps_url', 'start_time', 'end_time']):
+                return None
+                
+            if 'San Francisco' in event['title']:
+                sf_events.append(event)
+                
+        if sf_events:
+            filtered_locations[date] = sf_events
+
+    print(sf_events)
+            
+    return filtered_locations if filtered_locations else None
+
+def extract_sf_locations(playwright: Playwright):
+    """Extract SF locations using Playwright and Claude"""
+    try:
+        # Connect to Browserbase
+        chromium = playwright.chromium
+        browser = chromium.connect_over_cdp(
+            f'wss://connect.browserbase.com?apiKey={os.environ["BROWSERBASE_API_KEY"]}'
+        )
+        context = browser.contexts[0]
+        page = context.pages[0]
+
+        # Navigate to website
+        page.goto('https://www.cousinsmainelobster.com/locations/san-francisco-bay-area-ca/')
+        page.wait_for_selector('.detail-schedule')
+        schedule_html = page.eval_on_selector('.detail-schedule', 'el => el.outerHTML')
+        
+        # Call Claude API
+        headers = {
+            'Content-Type': 'application/json',
+            'x-api-key': os.environ["ANTHROPIC_API_KEY"],
+            'anthropic-version': '2023-06-01'
+        }
+        
+        prompt = f"""Given the HTML schedule below, extract the San Francisco locations and format them as a JSON object. 
+        The dates should be in MM-DD format as keys, and each date should have an array of event objects.
+        Each event object should include:
+        - title
+        - location
+        - maps_url
+        - start_time (in 24-hour format)
+        - end_time (24-hour format)
+        
+        HTML:
+        {schedule_html}
+        
+        Please format the response as a valid JSON object."""
+
+        response = requests.post(
+            'https://api.anthropic.com/v1/messages',
+            headers=headers,
+            json={
+                "messages": [{"role": "user", "content": prompt}],
+                "model": "claude-3-sonnet-20240229",
+                "max_tokens": 4096,
+                "temperature": 0
+            }
+        )
+        
+        result = response.json()
+        locations = json.loads(result['content'][0]['text'])
+        print(f'Locations: {locations}')
+        
+        # Add validation
+        validated_locations = validate_locations(locations)
+        print(f'Validated locations: {validated_locations}')
+        if not validated_locations:
+            print("Invalid or empty location data received")
+            return None
+            
+        browser.close()
+        return validated_locations
+        
+    except Exception as e:
+        print(f"Error extracting locations: {str(e)}")
+        if 'browser' in locals():
+            browser.close()
+        return None
+
 
 class FoodTruckCalendar:
     def __init__(self, service_account_path='service-account.json'):
@@ -45,24 +143,8 @@ class FoodTruckCalendar:
                 print(f"Using existing calendar: {self.calendar_id}")
                 return
             except Exception:
-                print("Saved calendar not found, creating new one...")
-                
-        calendar_body = {
-            'description': "Cousin's Lobster Locations",
-            'summary': "Cousin's Lobster Schedule",
-            'timeZone': 'America/Los_Angeles'
-        }
-        
-        try:
-            created_calendar = self.service.calendars().insert(body=calendar_body).execute()
-            self.calendar_id = created_calendar['id']
-            with open(calendar_id_path, 'w') as f:
-                f.write(self.calendar_id)
-            print(f"Created new calendar with ID: {self.calendar_id}")
-        except Exception as e:
-            print(f"Error creating calendar: {e}")
-            raise
-
+                raise Exception("Saved calendar not found, and creating a new one is not allowed.")
+            
     def clear_existing_events(self, start_date, end_date):
         """Clears existing events in the specified date range."""
         try:
@@ -81,70 +163,8 @@ class FoodTruckCalendar:
         except Exception as e:
             print(f"Error clearing events: {e}")
 
-    def create_events(self, year=2024):
+    def create_events(self, schedule, year=2024):
         """Creates calendar events for SF food truck locations."""
-        schedule = {
-            "11-16": [
-                {
-                    "title": "Pier 41 San Francisco (Cart Only)",
-                    "location": "Pier 41 Marine Terminal, The Embarcadero, San Francisco, CA 94133, USA",
-                    "maps_url": "https://maps.google.com/?q=Pier 41 Marine Terminal, The Embarcadero, San Francisco, CA 94133, USA",
-                    "start_time": "11:30",
-                    "end_time": "20:00"
-                }
-            ],
-            "11-19": [
-                {
-                    "title": "San Francisco: Equator Coffees",
-                    "location": "2 Marina Blvd, San Francisco, CA 94123, USA",
-                    "maps_url": "https://maps.google.com/?q=2 Marina Blvd, San Francisco, CA 94123, USA",
-                    "start_time": "11:30",
-                    "end_time": "14:30"
-                },
-                {
-                    "title": "San Francisco: SPARK Social SF",
-                    "location": "601 Mission Bay Boulevard North, San Francisco, CA 94158, USA",
-                    "maps_url": "https://maps.google.com/?q=601 Mission Bay Boulevard North, San Francisco, CA 94158, USA",
-                    "start_time": "17:00",
-                    "end_time": "20:30"
-                }
-            ],
-            "11-20": [
-                {
-                    "title": "San Francisco: Intersection of Embarcadero and Market Street",
-                    "location": "Market St & Steuart St, San Francisco, CA 94105",
-                    "maps_url": "https://maps.google.com/?q=Market St &, Steuart St, San Francisco, CA 94105",
-                    "start_time": "11:30",
-                    "end_time": "19:30"
-                }
-            ],
-            "11-21": [
-                {
-                    "title": "San Francisco: Intersection of Embarcadero and Market Street",
-                    "location": "Market St & Steuart St, San Francisco, CA 94105",
-                    "maps_url": "https://maps.google.com/?q=Market St &, Steuart St, San Francisco, CA 94105",
-                    "start_time": "11:30",
-                    "end_time": "14:00"
-                }
-            ],
-            "11-22": [
-                {
-                    "title": "San Francisco: Marina Green",
-                    "location": "500 Marina Blvd, San Francisco, CA 94123, USA",
-                    "maps_url": "https://maps.google.com/?q=500 Marina Blvd, San Francisco, CA 94123, USA",
-                    "start_time": "11:30",
-                    "end_time": "19:30"
-                },
-                {
-                    "title": "Pier 41 San Francisco (Cart Only)",
-                    "location": "Pier 41 Marine Terminal, The Embarcadero, San Francisco, CA 94133, USA",
-                    "maps_url": "https://maps.google.com/?q=Pier 41 Marine Terminal, The Embarcadero, San Francisco, CA 94133, USA",
-                    "start_time": "11:30",
-                    "end_time": "20:00"
-                }
-            ]
-        }
-        
         # Calculate date range for clearing existing events
         dates = sorted(schedule.keys())
         start_date = datetime(year, int(dates[0].split('-')[0]), 
@@ -153,7 +173,7 @@ class FoodTruckCalendar:
                           int(dates[-1].split('-')[1])) + timedelta(days=1)
         
         self.clear_existing_events(start_date, end_date)
-        
+
         for date, events in schedule.items():
             month, day = date.split('-')
             for event in events:
@@ -195,16 +215,32 @@ class FoodTruckCalendar:
                 except Exception as e:
                     print(f"Error creating event: {e}")
 
-@stub.function(
+@app.function(
     image=image,
     volumes={"/credentials": volume},
-    schedule=modal.Cron("0 8 * * 1,4")
+    schedule=modal.Cron("0 8 * * 6"),
+    secrets=[modal.Secret.from_name("cousin-lobster-secrets")]    
 )
 def update_calendar():
+    # Extract locations
+    with sync_playwright() as playwright:
+        sf_locations = extract_sf_locations(playwright)
+    
+    if not sf_locations:
+        print("Failed to extract locations. Calendar not updated.")
+        return
+    
+    # Update calendar
     SERVICE_ACCOUNT_PATH = "/credentials/service-account.json"
     CALENDAR_ID_PATH = "/credentials/calendar_id.txt"
     
     calendar = FoodTruckCalendar(service_account_path=SERVICE_ACCOUNT_PATH)
     calendar.authenticate()
     calendar.get_or_create_calendar(calendar_id_path=CALENDAR_ID_PATH)
-    calendar.create_events()
+    calendar.create_events(schedule=sf_locations)
+    
+    print("Calendar successfully updated with new locations")
+
+# For local testing
+if __name__ == "__main__":
+    update_calendar.local()
