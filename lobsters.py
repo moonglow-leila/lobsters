@@ -213,7 +213,7 @@ class FoodTruckCalendar:
 @app.function(
     image=image,
     volumes={"/credentials": volume},
-    schedule=modal.Cron("0 18 * * 6"),
+    schedule=modal.Cron("0 18 * * *"),
     secrets=[modal.Secret.from_name("cousin-lobster-secrets")]    
 )
 def update_calendar():
