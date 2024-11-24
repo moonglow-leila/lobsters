@@ -17,36 +17,17 @@ image = modal.Image.debian_slim().pip_install(
     "requests"
 ).run_commands("playwright install chromium")
 
-def validate_locations(locations):
-    """Validates and filters location data structure"""
-    if not isinstance(locations, dict):
-        return None
-        
-    filtered_locations = {}
-    for date, events in locations.items():
-        # Validate date format (MM-DD)
-        if not isinstance(date, str) or not len(date.split('-')) == 2:
-            return None
-            
-        # Filter and validate events
-        sf_events = []
-        for event in events:
-            if not all(key in event for key in ['title', 'location', 'maps_url', 'start_time', 'end_time']):
-                return None
-                
-            if 'San Francisco' in event['title']:
-                sf_events.append(event)
-                
-        if sf_events:
-            filtered_locations[date] = sf_events
-
-    print(sf_events)
-            
-    return filtered_locations if filtered_locations else None
-
 def extract_sf_locations(playwright: Playwright):
     """Extract SF locations using Playwright and Claude"""
     try:
+        # Add check for latest parsed date
+        latest_date_file = "/credentials/latest_parsed_date.json"
+        latest_parsed_date = None
+        if os.path.exists(latest_date_file):
+            with open(latest_date_file, 'r') as f:
+                latest_parsed_date = json.load(f).get('date')
+                print(f"Latest parsed date: {latest_parsed_date}")
+
         # Connect to Browserbase
         chromium = playwright.chromium
         browser = chromium.connect_over_cdp(
@@ -75,11 +56,13 @@ def extract_sf_locations(playwright: Playwright):
         - maps_url
         - start_time (in 24-hour format)
         - end_time (24-hour format)
+
+        Additionally, please include a "dates" field in the response with an array of all parsed dates in MM-DD format.
         
         HTML:
         {schedule_html}
         
-        Please format the response as a valid JSON object."""
+        Please format the response as a valid JSON object with both "locations" and "dates" fields."""
 
         response = requests.post(
             'https://api.anthropic.com/v1/messages',
@@ -93,18 +76,30 @@ def extract_sf_locations(playwright: Playwright):
         )
         
         result = response.json()
-        locations = json.loads(result['content'][0]['text'])
-        print(f'Locations: {locations}')
+        parsed_data = json.loads(result['content'][0]['text'])
+        locations = parsed_data['locations']
+        all_dates = parsed_data['dates']
+        print(f'All parsed dates: {all_dates}')
+        
+        # Filter out old dates if latest_parsed_date exists
+        if latest_parsed_date:
+            locations = {
+                date: events for date, events in locations.items()
+                if date > latest_parsed_date
+            }
+            
+        # Update latest parsed date if we have new data
+        if locations and all_dates:
+            newest_date = max(all_dates)
+            if not latest_parsed_date or newest_date > latest_parsed_date:
+                with open(latest_date_file, 'w') as f:
+                    json.dump({'date': newest_date}, f)
+                print(f"Updated latest parsed date to: {newest_date}")
         
         # Add validation
-        validated_locations = validate_locations(locations)
-        print(f'Validated locations: {validated_locations}')
-        if not validated_locations:
-            print("Invalid or empty location data received")
-            return None
-            
+
         browser.close()
-        return validated_locations
+        return locations
         
     except Exception as e:
         print(f"Error extracting locations: {str(e)}")
