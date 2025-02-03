@@ -158,8 +158,12 @@ class FoodTruckCalendar:
         except Exception as e:
             print(f"Error clearing events: {e}")
 
-    def create_events(self, schedule, year=2024):
+    def create_events(self, schedule, year=None):
         """Creates calendar events for SF food truck locations."""
+        # Use current year if not specified
+        if year is None:
+            year = datetime.now().year
+            
         # Calculate date range for clearing existing events
         dates = sorted(schedule.keys())
         start_date = datetime(year, int(dates[0].split('-')[0]), 
