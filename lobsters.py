@@ -5,6 +5,7 @@ import requests
 from datetime import datetime, timedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+import anthropic
 
 import modal
 
@@ -14,7 +15,8 @@ app = modal.App("cousin-lobster")
 image = modal.Image.debian_slim().pip_install(
     "google-api-python-client",
     "playwright",
-    "requests"
+    "requests",
+    "anthropic"
 ).run_commands("playwright install chromium")
 
 def extract_sf_locations(playwright: Playwright):
@@ -41,13 +43,8 @@ def extract_sf_locations(playwright: Playwright):
         page.wait_for_selector('.detail-schedule')
         schedule_html = page.eval_on_selector('.detail-schedule', 'el => el.outerHTML')
         
-        # Call Claude API
-        headers = {
-            'Content-Type': 'application/json',
-            'x-api-key': os.environ["ANTHROPIC_API_KEY"],
-            'anthropic-version': '2023-06-01'
-        }
-        
+        # Call Claude API using SDK
+        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
         prompt = f"""Given the HTML schedule below, extract the San Francisco locations and format them as a JSON object. Do not include cart only events.
         The dates should be in MM-DD format as keys, and each date should have an array of event objects.
         Each event object should include:
@@ -64,19 +61,14 @@ def extract_sf_locations(playwright: Playwright):
         
         Please format the response as a valid JSON object with both "locations" and "dates" fields."""
 
-        response = requests.post(
-            'https://api.anthropic.com/v1/messages',
-            headers=headers,
-            json={
-                "messages": [{"role": "user", "content": prompt}],
-                "model": "claude-3-5-sonnet-latest",
-                "max_tokens": 4096,
-                "temperature": 0
-            }
+        message = client.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=4096,
+            temperature=0,
+            messages=[{"role": "user", "content": prompt}]
         )
         
-        result = response.json()
-        parsed_data = json.loads(result['content'][0]['text'])
+        parsed_data = json.loads(message.content[0].text)
         locations = parsed_data['locations']
         all_dates = parsed_data['dates']
         print(f'All parsed dates: {all_dates}')
@@ -102,7 +94,10 @@ def extract_sf_locations(playwright: Playwright):
         return locations
         
     except Exception as e:
+        import traceback
         print(f"Error extracting locations: {str(e)}")
+        print("Traceback:")
+        print(traceback.format_exc())
         if 'browser' in locals():
             browser.close()
         return None
